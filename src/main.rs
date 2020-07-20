@@ -33,6 +33,8 @@ struct LogsOpts {
     follow: bool,
     #[clap(short = 'n', default_value = "nuwolf")]
     namespace: String,
+    #[clap(short = 't', long = "tail-length", default_value = "100")]
+    tail_length: i64,
 }
 
 #[tokio::main]
@@ -42,7 +44,7 @@ async fn main() -> Result<()> {
     match opts.subcmd {
         SubCmd::Logs(o) => match o.pod {
             Some(p) => {
-                stream_logs(&o.namespace, &p).await?;
+                stream_logs(&o.namespace, &p, o.tail_length).await?;
             }
             None => {
                 // println!("Ops: {:?}", o);
@@ -55,7 +57,7 @@ async fn main() -> Result<()> {
                         let index = input.trim().parse::<usize>()?;
                         if let Some(p) = pods.get(&index) {
                             println!("{}", p);
-                            stream_logs(&o.namespace, &p).await?;
+                            stream_logs(&o.namespace, &p, o.tail_length).await?;
                         }
                     }
                     Err(error) => println!("error: {}", error),
@@ -86,7 +88,7 @@ async fn list_pods(namespace: &str) -> Result<HashMap<usize, String>> {
     Ok(pod_map)
 }
 
-async fn stream_logs(namespace: &str, pod_name: &str) -> Result<()> {
+async fn stream_logs(namespace: &str, pod_name: &str, tail_lines: i64) -> Result<()> {
     let mut client_config = Config::infer().await?;
     client_config.timeout = std::time::Duration::from_secs(60 * 60);
     let client = Client::new(client_config);
@@ -95,7 +97,7 @@ async fn stream_logs(namespace: &str, pod_name: &str) -> Result<()> {
     let mut lp = LogParams::default();
     lp.follow = true;
     lp.pretty = true;
-    lp.tail_lines = Some(50);
+    lp.tail_lines = Some(tail_lines);
     let mut logs = pods.log_stream(pod_name, &lp).await?.boxed();
     println!("{}Test", color::Fg(color::White));
     while let Some(line) = logs.try_next().await? {
