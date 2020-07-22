@@ -8,12 +8,26 @@ use kube::{
 };
 // use log::info;
 use futures::future::join_all;
+use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
 use std::io;
 use std::io::Write;
 use termion::{color, style};
 use tokio::task;
+
+lazy_static! {
+    static ref COLORS: Vec<color::Rgb> = vec![
+        color::Rgb(0, 255, 0),
+        color::Rgb(128, 128, 0),
+        color::Rgb(0, 255, 255),
+        color::Rgb(255, 192, 203),
+        color::Rgb(245, 255, 250),
+        color::Rgb(221, 160, 221),
+        color::Rgb(154, 205, 50),
+        color::Rgb(230, 230, 250),
+    ];
+}
 
 #[derive(Clap)]
 #[clap(version = "0.1.0", author = "Jonathan Rothberg")]
@@ -49,7 +63,8 @@ async fn main() -> Result<()> {
     match opts.subcmd {
         SubCmd::Logs(o) => match o.pod {
             Some(p) => {
-                stream_logs(o.namespace, p, o.tail_length).await?;
+                let c = get_color()?;
+                stream_logs(o.namespace, p, o.tail_length, c).await?;
             }
             None => {
                 match o.pattern {
@@ -58,9 +73,10 @@ async fn main() -> Result<()> {
                         println!("Pods: {:?}", pods);
                         let mut tasks = vec![];
                         for name in pods {
+                            let c = get_color()?;
                             let n = o.namespace.clone();
                             let pn = name.clone();
-                            let t = task::spawn(stream_logs(n, pn, o.tail_length));
+                            let t = task::spawn(stream_logs(n, pn, o.tail_length, c));
                             tasks.push(t);
                         }
 
@@ -77,7 +93,8 @@ async fn main() -> Result<()> {
                                 let index = input.trim().parse::<usize>()?;
                                 if let Some(p) = pods.get(&index) {
                                     println!("{}", p);
-                                    stream_logs(o.namespace, p.clone(), o.tail_length).await?;
+                                    let c = get_color()?;
+                                    stream_logs(o.namespace, p.clone(), o.tail_length, c).await?;
                                 }
                             }
                             Err(error) => println!("error: {}", error),
@@ -89,6 +106,16 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn get_color() -> Result<color::Rgb> {
+    use rand::Rng;
+
+    let mut rng = rand::thread_rng();
+    let index = rng.gen_range(0.0, COLORS.len() as f32) as usize;
+    let rgb = COLORS[index];
+
+    Ok(rgb)
 }
 
 async fn list_pods(namespace: &str) -> Result<HashMap<usize, String>> {
@@ -135,7 +162,12 @@ async fn collect_pods(namespace: &str, pattern: &str) -> Result<Vec<String>> {
     Ok(matching_pods)
 }
 
-async fn stream_logs(namespace: String, pod_name: String, tail_lines: i64) -> Result<()> {
+async fn stream_logs(
+    namespace: String,
+    pod_name: String,
+    tail_lines: i64,
+    c: color::Rgb,
+) -> Result<()> {
     let mut client_config = Config::infer().await?;
     // client_config.timeout = std::time::Duration::from_secs(60 * 60 * 24);
     client_config.timeout = None;
@@ -151,16 +183,17 @@ async fn stream_logs(namespace: String, pod_name: String, tail_lines: i64) -> Re
     while let Some(line) = logs.try_next().await? {
         let line_str = String::from_utf8((&line).to_vec())?;
         if line_str.contains("ERROR") || line_str.contains("error") {
+            print!("{}{}  ", color::Fg(c), pod_name);
             println!(
-                "{}  {}{}{}{}",
-                pod_name,
+                "{}{}{}{}",
                 color::Fg(color::Red),
                 style::Bold,
                 line_str,
                 style::Reset
             );
         } else {
-            println!("{}  {}{}", pod_name, color::Fg(color::White), line_str);
+            print!("{}{}  ", color::Fg(c), pod_name);
+            println!("{}{}", color::Fg(color::White), line_str);
         }
     }
 

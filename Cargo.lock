@@ -570,6 +570,7 @@ dependencies = [
  "kube-derive",
  "lazy_static",
  "log",
+ "rand",
  "regex",
  "termion",
  "thiserror",
