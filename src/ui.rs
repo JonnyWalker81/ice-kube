@@ -11,29 +11,32 @@ use tui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Span, Spans},
-    widgets::{
-        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Tabs,
-    },
+    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState, Tabs},
     Terminal,
 };
 
-use crate::{util::get_pods, UIOpts};
+use crate::{
+    util::{describe_pod, get_context, get_pods},
+    UIOpts,
+};
 
 #[derive(Clone, Debug)]
-enum Event<I> {
+pub enum Event<I> {
     Input(I),
     Tick,
 }
 
 #[derive(Copy, Clone, Debug)]
-enum MenuItem {
+enum ActionItem {
     Home,
+    Describe(usize),
 }
 
-impl From<MenuItem> for usize {
-    fn from(input: MenuItem) -> usize {
+impl From<ActionItem> for usize {
+    fn from(input: ActionItem) -> usize {
         match input {
-            MenuItem::Home => 0,
+            ActionItem::Home => 0,
+            ActionItem::Describe(..) => 1,
         }
     }
 }
@@ -42,6 +45,17 @@ impl From<MenuItem> for usize {
 struct KubePod {
     name: String,
 }
+
+// #[derive(Clone, Debug)]
+// pub struct UI {
+//     pub event_tx: Option<tokio::sync::mpsc::Sender<Event<KeyEvent>>>,
+// }
+
+// impl UI {
+//     pub fn new(tx: tokio::sync::mpsc::Sender<Event<KeyEvent>>) -> Self {
+//         Self { event_tx: Some(tx) }
+//     }
+// }
 
 pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
     println!("Loading UI...");
@@ -76,13 +90,29 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
     terminal.clear()?;
 
     let menu_titles = vec!["Home"];
-    let active_menu_item = MenuItem::Home;
-    let mut pod_list_state = ListState::default();
-    pod_list_state.select(Some(0));
+    let mut active_action_item = ActionItem::Home;
+    let mut pod_table_state = TableState::default();
+    pod_table_state.select(Some(0));
 
     let pod_list = refresh_pod_list(namespace).await?;
+    let cluster_url = get_context().await?;
+    let mut describe_pod_text = String::new();
+    let mut scroll_offset = 0;
 
     loop {
+        if describe_pod_text.is_empty() {
+            describe_pod_text = match active_action_item {
+                ActionItem::Describe(idx) => {
+                    if let Some(pod) = pod_list.get(idx) {
+                        describe_pod(namespace, &pod.name).await?
+                    } else {
+                        String::new()
+                    }
+                }
+                _ => String::new(),
+            };
+        }
+
         terminal.draw(|rect| {
             let size = rect.size();
             let chunks = Layout::default()
@@ -98,14 +128,14 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
                 )
                 .split(size);
 
-            let copyright = Paragraph::new("ice-kube 2021")
+            let cluster_context = Paragraph::new(cluster_url.to_string())
                 .style(Style::default().fg(Color::LightCyan))
                 .alignment(Alignment::Center)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
                         .style(Style::default().fg(Color::White))
-                        .title("Copyright")
+                        .title("Context")
                         .border_type(BorderType::Plain),
                 );
 
@@ -126,28 +156,42 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
                 .collect();
 
             let tabs = Tabs::new(menu)
-                .select(active_menu_item.into())
+                .select(active_action_item.into())
                 .block(Block::default().title("Menu").borders(Borders::ALL))
                 .style(Style::default().fg(Color::White))
                 .highlight_style(Style::default().fg(Color::Yellow))
                 .divider(Span::raw("|"));
 
             rect.render_widget(tabs, chunks[0]);
-            match active_menu_item {
-                MenuItem::Home => {
-                    let pods_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints(
-                            [Constraint::Percentage(20), Constraint::Percentage(80)].as_ref(),
-                        )
-                        .split(chunks[1]);
-                    let (left, right) = render_pods(&pod_list, &pod_list_state);
+            match active_action_item {
+                ActionItem::Home => {
+                    // let pods_chunks = Layout::default()
+                    //     .direction(Direction::Horizontal)
+                    //     .constraints(
+                    //         [Constraint::Percentage(20), Constraint::Percentage(80)].as_ref(),
+                    //     )
+                    //     .split(chunks[1]);
+                    let table = render_pods(&pod_list);
 
-                    rect.render_stateful_widget(left, pods_chunks[0], &mut pod_list_state);
-                    rect.render_widget(right, pods_chunks[1]);
+                    // rect.render_stateful_widget(left, pods_chunks[0], &mut pod_list_state);
+                    rect.render_stateful_widget(table, chunks[1], &mut pod_table_state);
+                }
+                ActionItem::Describe(_) => {
+                    let describe_text = Paragraph::new(describe_pod_text.clone())
+                        .style(Style::default().fg(Color::LightCyan))
+                        .alignment(Alignment::Left)
+                        .block(
+                            Block::default()
+                                .style(Style::default().fg(Color::White))
+                                .title("")
+                                .border_type(BorderType::Plain),
+                        )
+                        .scroll((scroll_offset, 0));
+
+                    rect.render_widget(describe_text, chunks[1]);
                 }
             }
-            rect.render_widget(copyright, chunks[2]);
+            rect.render_widget(cluster_context, chunks[2]);
         })?;
 
         if let Some(event) = rx.recv().await {
@@ -158,34 +202,47 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
                         terminal.show_cursor()?;
                         break;
                     }
-                    // KeyCode::Char('h') => active_menu_item = MenuItem::Home,
-                    // KeyCode::Char('p') => active_menu_item = MenuItem::Pets,
-                    // KeyCode::Char('a') => {
-                    //     add_random_pet_to_db().expect("can add new random pet");
-                    // }
-                    // KeyCode::Char('d') => {
-                    //     remove_pet_at_index(&mut pet_list_state).expect("can remove pet");
-                    // }
-                    // KeyCode::Down => {
-                    //     if let Some(selected) = pet_list_state.selected() {
-                    //         let amount_pets = read_db().expect("can fetch pet list").len();
-                    //         if selected >= amount_pets - 1 {
-                    //             pet_list_state.select(Some(0));
-                    //         } else {
-                    //             pet_list_state.select(Some(selected + 1));
-                    //         }
-                    //     }
-                    // }
-                    // KeyCode::Up => {
-                    //     if let Some(selected) = pet_list_state.selected() {
-                    //         let amount_pets = read_db().expect("can fetch pet list").len();
-                    //         if selected > 0 {
-                    //             pet_list_state.select(Some(selected - 1));
-                    //         } else {
-                    //             pet_list_state.select(Some(amount_pets - 1));
-                    //         }
-                    //     }
-                    // }
+                    KeyCode::Char('d') => {
+                        if let Some(selected) = pod_table_state.selected() {
+                            if let Some(pod) = pod_list.get(selected) {
+                                describe_pod_text = describe_pod(namespace, &pod.name).await?;
+                                active_action_item = ActionItem::Describe(selected);
+                            }
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => match active_action_item {
+                        ActionItem::Home => {
+                            if let Some(selected) = pod_table_state.selected() {
+                                if selected >= pod_list.len() - 1 {
+                                    pod_table_state.select(Some(0));
+                                } else {
+                                    pod_table_state.select(Some(selected + 1));
+                                }
+                            }
+                        }
+                        ActionItem::Describe(_) => {
+                            scroll_offset += 1;
+                            if scroll_offset >= describe_pod_text.len() as u16 {
+                                scroll_offset = describe_pod_text.len() as u16 - 1;
+                            }
+                        }
+                    },
+                    KeyCode::Up | KeyCode::Char('k') => match active_action_item {
+                        ActionItem::Home => {
+                            if let Some(selected) = pod_table_state.selected() {
+                                if selected > 0 {
+                                    pod_table_state.select(Some(selected - 1));
+                                } else {
+                                    pod_table_state.select(Some(pod_list.len() - 1));
+                                }
+                            }
+                        }
+                        ActionItem::Describe(_) => {
+                            if scroll_offset > 0 {
+                                scroll_offset -= 1;
+                            }
+                        }
+                    },
                     _ => {}
                 },
                 Event::Tick => {}
@@ -208,76 +265,63 @@ async fn refresh_pod_list(namespace: &str) -> Result<Vec<KubePod>> {
     Ok(pod_list)
 }
 
-fn render_pods<'a>(pod_list: &[KubePod], pod_list_state: &ListState) -> (List<'a>, Table<'a>) {
-    let pods = Block::default()
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::White))
-        .title("Pods")
-        .border_type(BorderType::Plain);
+fn render_pods<'a>(pod_list: &[KubePod]) -> Table<'a> {
+    // let pods = Block::default()
+    //     .borders(Borders::ALL)
+    //     .style(Style::default().fg(Color::White))
+    //     .title("Pods")
+    //     .border_type(BorderType::Plain);
 
-    let items: Vec<_> = pod_list
+    let rows: Vec<_> = pod_list
         .iter()
-        .map(|pod| {
-            ListItem::new(Spans::from(vec![Span::styled(
-                pod.name.clone(),
-                Style::default(),
-            )]))
+        .map(|p| {
+            Row::new(vec![
+                Cell::from(Span::raw(p.name.to_string())),
+                Cell::from(Span::raw("1/1")),
+                Cell::from(Span::raw("0")),
+                Cell::from(Span::raw("Running")),
+            ])
         })
         .collect();
 
-    let selected_pod = pod_list
-        .get(
-            pod_list_state
-                .selected()
-                .expect("there is always a selected pod"),
+    let pod_detail = Table::new(rows)
+        .header(Row::new(vec![
+            Cell::from(Span::styled(
+                "Name",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "Ready",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "Restarts",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                "Status",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .style(Style::default().fg(Color::White))
+                .title("Detail")
+                .border_type(BorderType::Plain),
         )
-        .expect("exists")
-        .clone();
+        .widths(&[
+            Constraint::Percentage(20),
+            Constraint::Percentage(5),
+            Constraint::Percentage(5),
+            Constraint::Percentage(70),
+        ])
+        .highlight_style(
+            Style::default()
+                .bg(Color::Green)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
 
-    let list = List::new(items).block(pods).highlight_style(
-        Style::default()
-            .bg(Color::Yellow)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    let pod_detail = Table::new(vec![Row::new(vec![
-        Cell::from(Span::raw(selected_pod.name)),
-        Cell::from(Span::raw("1/1")),
-        Cell::from(Span::raw("0")),
-        Cell::from(Span::raw("Running")),
-    ])])
-    .header(Row::new(vec![
-        Cell::from(Span::styled(
-            "Name",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Cell::from(Span::styled(
-            "Ready",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Cell::from(Span::styled(
-            "Restarts",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Cell::from(Span::styled(
-            "Status",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .style(Style::default().fg(Color::White))
-            .title("Detail")
-            .border_type(BorderType::Plain),
-    )
-    .widths(&[
-        Constraint::Percentage(20),
-        Constraint::Percentage(5),
-        Constraint::Percentage(5),
-        Constraint::Percentage(70),
-    ]);
-
-    (list, pod_detail)
+    pod_detail
 }

@@ -1,18 +1,9 @@
 use anyhow::Result;
 use clap::Clap;
 
-
 mod logs;
 mod ui;
 mod util;
-
-// #[derive(Error, Debug)]
-// pub enum Error {
-//     #[error("error with Kubernetes: {0}")]
-//     KubeError(#[from] io::Error),
-//     #[error("error parsing the DB file: {0}")]
-//     ParseDBError(#[from] serde_json::Error),
-// }
 
 #[derive(Clap)]
 #[clap(version = "0.1.0", author = "Jonathan Rothberg")]
@@ -55,7 +46,13 @@ pub struct UIOpts {
 async fn main() -> Result<()> {
     let opts: Opts = Opts::parse();
 
-    run(&opts).await
+    match run(&opts).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Error in main: {:?}", e);
+            Err(e)
+        }
+    }
 }
 
 async fn run(opts: &Opts) -> Result<()> {
