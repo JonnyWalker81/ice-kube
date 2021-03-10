@@ -14,7 +14,7 @@ use std::io::Write;
 use termion::{color, style};
 use tokio::task;
 
-use crate::{get_pods, LogsOpts};
+use crate::{util::get_pods, LogsOpts};
 
 lazy_static! {
     static ref COLORS: Vec<color::Rgb> = vec![
@@ -48,12 +48,7 @@ pub async fn follow_logs(o: &LogsOpts, p: &str) -> Result<()> {
         let n = o.namespace.clone();
         let pn = name.clone();
 
-        let h = if let Some(s) = &o.highlight {
-            s.clone()
-        } else {
-            String::new()
-        };
-        let t = task::spawn(stream_logs(n, pn, h, o.tail_length, c));
+        let t = task::spawn(stream_logs(n, pn, o.tail_length, c));
         tasks.push(t);
     }
 
@@ -74,19 +69,8 @@ pub async fn select_pod(o: &LogsOpts) -> Result<()> {
             if let Some(p) = pods.get(&index) {
                 println!("{}", p);
                 let c = get_color()?;
-                let h = if let Some(s) = &o.highlight {
-                    s.clone()
-                } else {
-                    String::new()
-                };
-                stream_logs(
-                    o.namespace.clone(),
-                    p.clone(),
-                    h.to_string(),
-                    o.tail_length,
-                    c,
-                )
-                .await?;
+
+                stream_logs(o.namespace.clone(), p.clone(), o.tail_length, c).await?;
             }
         }
         Err(error) => println!("error: {}", error),
@@ -136,7 +120,6 @@ async fn collect_pods(namespace: &str, pattern: &str) -> Result<Vec<String>> {
 pub async fn stream_logs(
     namespace: String,
     pod_name: String,
-    highlight_regex: String,
     tail_lines: i64,
     c: color::Rgb,
 ) -> Result<()> {
@@ -151,12 +134,11 @@ pub async fn stream_logs(
     lp.pretty = true;
     lp.tail_lines = Some(tail_lines);
     let mut logs = pods.log_stream(&pod_name, &lp).await?.boxed();
-    let re: Regex = Regex::new(&highlight_regex).unwrap();
     println!("{}", color::Fg(color::Reset));
     while let Some(line) = logs.try_next().await? {
         let line_str = String::from_utf8((&line).to_vec())?;
-        print!("{}{}  ", color::Fg(c), pod_name);
         if line_str.contains("ERROR") || line_str.contains("error") {
+            print!("{}{}  ", color::Fg(c), pod_name);
             println!(
                 "{}{}{}{}",
                 color::Fg(color::Red),
@@ -164,15 +146,8 @@ pub async fn stream_logs(
                 line_str,
                 style::Reset
             );
-        } else if re.is_match(&line_str) {
-            println!(
-                "{}{}{}{}",
-                color::Fg(color::Yellow),
-                style::Bold,
-                line_str,
-                style::Reset
-            );
         } else {
+            print!("{}{}  ", color::Fg(c), pod_name);
             println!("{}{}", color::Fg(color::Reset), line_str);
         }
     }

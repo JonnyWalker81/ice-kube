@@ -17,7 +17,7 @@ use tui::{
     Terminal,
 };
 
-use crate::{get_pods, UIOpts};
+use crate::{util::get_pods, UIOpts};
 
 #[derive(Clone, Debug)]
 enum Event<I> {

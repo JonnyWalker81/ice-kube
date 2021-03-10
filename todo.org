@@ -6,3 +6,6 @@
 ** Add parameter to involved functions
 ** Check regex in log tail loop
 ** Output log contents that match in Yellow
+
+* Display result of Describe on a pod
+** Pressing "d" on a selected pod should display the results of calling Describe on the pod.
