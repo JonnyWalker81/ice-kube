@@ -1,0 +1,8 @@
+#+TITLE: Todo
+
+
+* Add highlight support to highlight lines in the log that match a supplied regex.
+** Add flag to command line options
+** Add parameter to involved functions
+** Check regex in log tail loop
+** Output log contents that match in Yellow
