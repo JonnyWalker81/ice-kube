@@ -14,7 +14,10 @@ use std::io::Write;
 use termion::{color, style};
 use tokio::task;
 
-use crate::{util::get_pods, LogsOpts};
+use crate::{
+    util::{get_pods, OptionEx},
+    LogsOpts,
+};
 
 lazy_static! {
     static ref COLORS: Vec<color::Rgb> = vec![
@@ -48,7 +51,9 @@ pub async fn follow_logs(o: &LogsOpts, p: &str) -> Result<()> {
         let n = o.namespace.clone();
         let pn = name.clone();
 
-        let t = task::spawn(stream_logs(n, pn, o.tail_length, c));
+        let h = o.highlight.to_str();
+
+        let t = task::spawn(stream_logs(n, pn, o.tail_length, c, h));
         tasks.push(t);
     }
 
@@ -70,7 +75,9 @@ pub async fn select_pod(o: &LogsOpts) -> Result<()> {
                 println!("{}", p);
                 let c = get_color()?;
 
-                stream_logs(o.namespace.clone(), p.clone(), o.tail_length, c).await?;
+                let h = o.highlight.to_str();
+
+                stream_logs(o.namespace.clone(), p.clone(), o.tail_length, c, h).await?;
             }
         }
         Err(error) => println!("error: {}", error),
@@ -122,6 +129,7 @@ pub async fn stream_logs(
     pod_name: String,
     tail_lines: i64,
     c: color::Rgb,
+    highlight: String,
 ) -> Result<()> {
     let mut client_config = Config::infer().await?;
     // client_config.timeout = std::time::Duration::from_secs(60 * 60 * 24);
@@ -134,11 +142,12 @@ pub async fn stream_logs(
     lp.pretty = true;
     lp.tail_lines = Some(tail_lines);
     let mut logs = pods.log_stream(&pod_name, &lp).await?.boxed();
+    let re: Regex = Regex::new(&highlight).unwrap();
     println!("{}", color::Fg(color::Reset));
     while let Some(line) = logs.try_next().await? {
         let line_str = String::from_utf8((&line).to_vec())?;
+        print!("{}{}  ", color::Fg(c), pod_name);
         if line_str.contains("ERROR") || line_str.contains("error") {
-            print!("{}{}  ", color::Fg(c), pod_name);
             println!(
                 "{}{}{}{}",
                 color::Fg(color::Red),
@@ -146,8 +155,15 @@ pub async fn stream_logs(
                 line_str,
                 style::Reset
             );
+        } else if re.is_match(&line_str) {
+            println!(
+                "{}{}{}{}",
+                color::Fg(color::Yellow),
+                style::Bold,
+                line_str,
+                style::Reset
+            );
         } else {
-            print!("{}{}  ", color::Fg(c), pod_name);
             println!("{}{}", color::Fg(color::Reset), line_str);
         }
     }

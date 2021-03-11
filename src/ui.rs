@@ -4,8 +4,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use kube::api::Meta;
-use std::time::Duration;
 use std::{io, time::Instant};
+use std::{panic, time::Duration};
 use tui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
@@ -29,14 +29,12 @@ pub enum Event<I> {
 #[derive(Copy, Clone, Debug)]
 enum ActionItem {
     Home,
-    Describe(usize),
 }
 
 impl From<ActionItem> for usize {
     fn from(input: ActionItem) -> usize {
         match input {
             ActionItem::Home => 0,
-            ActionItem::Describe(..) => 1,
         }
     }
 }
@@ -60,6 +58,11 @@ struct KubePod {
 pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
     println!("Loading UI...");
     enable_raw_mode().expect("can run in raw mode");
+
+    panic::set_hook(Box::new(|info| {
+        println!("Panic: {}", info);
+        disable_raw_mode().expect("restore terminal raw mode");
+    }));
 
     let (mut tx, mut rx) = tokio::sync::mpsc::channel(1);
     let tick_rate = Duration::from_millis(200);
@@ -96,23 +99,8 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
 
     let pod_list = refresh_pod_list(namespace).await?;
     let cluster_url = get_context().await?;
-    let mut describe_pod_text = String::new();
-    let mut scroll_offset = 0;
 
     loop {
-        if describe_pod_text.is_empty() {
-            describe_pod_text = match active_action_item {
-                ActionItem::Describe(idx) => {
-                    if let Some(pod) = pod_list.get(idx) {
-                        describe_pod(namespace, &pod.name).await?
-                    } else {
-                        String::new()
-                    }
-                }
-                _ => String::new(),
-            };
-        }
-
         terminal.draw(|rect| {
             let size = rect.size();
             let chunks = Layout::default()
@@ -165,30 +153,8 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
             rect.render_widget(tabs, chunks[0]);
             match active_action_item {
                 ActionItem::Home => {
-                    // let pods_chunks = Layout::default()
-                    //     .direction(Direction::Horizontal)
-                    //     .constraints(
-                    //         [Constraint::Percentage(20), Constraint::Percentage(80)].as_ref(),
-                    //     )
-                    //     .split(chunks[1]);
                     let table = render_pods(&pod_list);
-
-                    // rect.render_stateful_widget(left, pods_chunks[0], &mut pod_list_state);
                     rect.render_stateful_widget(table, chunks[1], &mut pod_table_state);
-                }
-                ActionItem::Describe(_) => {
-                    let describe_text = Paragraph::new(describe_pod_text.clone())
-                        .style(Style::default().fg(Color::LightCyan))
-                        .alignment(Alignment::Left)
-                        .block(
-                            Block::default()
-                                .style(Style::default().fg(Color::White))
-                                .title("")
-                                .border_type(BorderType::Plain),
-                        )
-                        .scroll((scroll_offset, 0));
-
-                    rect.render_widget(describe_text, chunks[1]);
                 }
             }
             rect.render_widget(cluster_context, chunks[2]);
@@ -202,14 +168,6 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
                         terminal.show_cursor()?;
                         break;
                     }
-                    KeyCode::Char('d') => {
-                        if let Some(selected) = pod_table_state.selected() {
-                            if let Some(pod) = pod_list.get(selected) {
-                                describe_pod_text = describe_pod(namespace, &pod.name).await?;
-                                active_action_item = ActionItem::Describe(selected);
-                            }
-                        }
-                    }
                     KeyCode::Down | KeyCode::Char('j') => match active_action_item {
                         ActionItem::Home => {
                             if let Some(selected) = pod_table_state.selected() {
@@ -218,12 +176,6 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
                                 } else {
                                     pod_table_state.select(Some(selected + 1));
                                 }
-                            }
-                        }
-                        ActionItem::Describe(_) => {
-                            scroll_offset += 1;
-                            if scroll_offset >= describe_pod_text.len() as u16 {
-                                scroll_offset = describe_pod_text.len() as u16 - 1;
                             }
                         }
                     },
@@ -235,11 +187,6 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
                                 } else {
                                     pod_table_state.select(Some(pod_list.len() - 1));
                                 }
-                            }
-                        }
-                        ActionItem::Describe(_) => {
-                            if scroll_offset > 0 {
-                                scroll_offset -= 1;
                             }
                         }
                     },
@@ -266,12 +213,6 @@ async fn refresh_pod_list(namespace: &str) -> Result<Vec<KubePod>> {
 }
 
 fn render_pods<'a>(pod_list: &[KubePod]) -> Table<'a> {
-    // let pods = Block::default()
-    //     .borders(Borders::ALL)
-    //     .style(Style::default().fg(Color::White))
-    //     .title("Pods")
-    //     .border_type(BorderType::Plain);
-
     let rows: Vec<_> = pod_list
         .iter()
         .map(|p| {

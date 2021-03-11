@@ -1,3 +1,4 @@
+use crate::util::OptionEx;
 use anyhow::Result;
 use clap::Clap;
 
@@ -34,6 +35,8 @@ pub struct LogsOpts {
     pattern: Option<String>,
     #[clap(short = 'r', long = "terms")]
     terms: Option<String>,
+    #[clap(short = 'l', long = "highlight")]
+    highlight: Option<String>,
 }
 
 #[derive(Debug, Clap)]
@@ -60,7 +63,10 @@ async fn run(opts: &Opts) -> Result<()> {
         SubCmd::Logs(o) => match &o.pod {
             Some(p) => {
                 let c = logs::get_color()?;
-                logs::stream_logs(o.namespace.clone(), p.to_string(), o.tail_length, c).await?;
+
+                let h = o.highlight.to_str();
+
+                logs::stream_logs(o.namespace.clone(), p.to_string(), o.tail_length, c, h).await?;
             }
             None => match o.pattern {
                 Some(ref p) => {

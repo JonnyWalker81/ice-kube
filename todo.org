@@ -11,3 +11,6 @@
 ** Pressing "d" on a selected pod should display the results of calling Describe on the pod
 ** Switch to text view when "d" is pressed to display text
 ** Allow scrolling with "j" (Down) and "k" (Up)
+** Add new Action for Describe
+** Get Describe text when in Describe mode
+** Render paragraph widget with Describe text
