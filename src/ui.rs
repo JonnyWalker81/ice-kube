@@ -1,8 +1,10 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event as CEvent, KeyCode},
-    terminal::{disable_raw_mode, enable_raw_mode},
+    event::{self, Event as CEvent, KeyCode, KeyEvent},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
 };
+use k8s_openapi::api::core::v1::Pod;
 use kube::api::Meta;
 use std::{io, time::Instant};
 use std::{panic, time::Duration};
@@ -40,8 +42,17 @@ impl From<ActionItem> for usize {
 }
 
 #[derive(Clone, Debug)]
-struct KubePod {
+pub struct KubePod {
     name: String,
+    ready: i32,
+    container_count: i32,
+    status: String,
+    restart_count: i32,
+}
+
+#[derive(Clone, Debug)]
+pub enum UIEvent {
+    RefreshPods(Vec<KubePod>),
 }
 
 // #[derive(Clone, Debug)]
@@ -55,15 +66,7 @@ struct KubePod {
 //     }
 // }
 
-pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
-    println!("Loading UI...");
-    enable_raw_mode().expect("can run in raw mode");
-
-    panic::set_hook(Box::new(|info| {
-        println!("Panic: {}", info);
-        disable_raw_mode().expect("restore terminal raw mode");
-    }));
-
+fn start_key_events() -> tokio::sync::mpsc::Receiver<Event<KeyEvent>> {
     let (mut tx, mut rx) = tokio::sync::mpsc::channel(1);
     let tick_rate = Duration::from_millis(200);
     tokio::spawn(async move {
@@ -87,17 +90,34 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
         }
     });
 
+    rx
+}
+
+pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
+    println!("Loading UI...");
+    enable_raw_mode().expect("can run in raw mode");
+
+    panic::set_hook(Box::new(|info| {
+        println!("Panic: {}", info);
+        disable_raw_mode().expect("restore terminal raw mode");
+    }));
+
+    let mut rx = start_key_events();
+
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    io::stdout().execute(EnterAlternateScreen)?;
     terminal.clear()?;
 
-    let menu_titles = vec!["Home"];
+    let menu_titles = vec!["Pods"];
     let mut active_action_item = ActionItem::Home;
     let mut pod_table_state = TableState::default();
     pod_table_state.select(Some(0));
 
-    let pod_list = refresh_pod_list(namespace).await?;
+    let (mut ui_tx, mut ui_rx) = tokio::sync::mpsc::channel(1);
+    let mut pod_list = vec![];
+    refresh_pod_list(namespace, ui_tx.clone());
     let cluster_url = get_context().await?;
 
     loop {
@@ -160,56 +180,104 @@ pub async fn load_ui(namespace: &str, _opts: &UIOpts) -> Result<()> {
             rect.render_widget(cluster_context, chunks[2]);
         })?;
 
-        if let Some(event) = rx.recv().await {
-            match event {
-                Event::Input(event) => match event.code {
-                    KeyCode::Char('q') => {
-                        disable_raw_mode()?;
-                        terminal.show_cursor()?;
-                        break;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => match active_action_item {
-                        ActionItem::Home => {
-                            if let Some(selected) = pod_table_state.selected() {
-                                if selected >= pod_list.len() - 1 {
-                                    pod_table_state.select(Some(0));
-                                } else {
-                                    pod_table_state.select(Some(selected + 1));
-                                }
-                            }
-                        }
-                    },
-                    KeyCode::Up | KeyCode::Char('k') => match active_action_item {
-                        ActionItem::Home => {
-                            if let Some(selected) = pod_table_state.selected() {
-                                if selected > 0 {
-                                    pod_table_state.select(Some(selected - 1));
-                                } else {
-                                    pod_table_state.select(Some(pod_list.len() - 1));
-                                }
-                            }
-                        }
-                    },
-                    _ => {}
-                },
-                Event::Tick => {}
-            }
+        tokio::select! {
+        Some(event) = rx.recv() =>{
+               match event {
+                   Event::Input(event) => match event.code {
+                       KeyCode::Char('q') => {
+                           disable_raw_mode()?;
+                           io::stdout().execute(LeaveAlternateScreen)?;
+                           terminal.show_cursor()?;
+                           break;
+                       }
+                       KeyCode::Down | KeyCode::Char('j') => match active_action_item {
+                           ActionItem::Home => {
+                               if let Some(selected) = pod_table_state.selected() {
+                                   if selected >= pod_list.len() - 1 {
+                                       pod_table_state.select(Some(0));
+                                   } else {
+                                       pod_table_state.select(Some(selected + 1));
+                                   }
+                               }
+                           }
+                       },
+                       KeyCode::Up | KeyCode::Char('k') => match active_action_item {
+                           ActionItem::Home => {
+                               if let Some(selected) = pod_table_state.selected() {
+                                   if selected > 0 {
+                                       pod_table_state.select(Some(selected - 1));
+                                   } else {
+                                       pod_table_state.select(Some(pod_list.len() - 1));
+                                   }
+                               }
+                           }
+                       },
+                       _ => {}
+                   },
+                   Event::Tick => {}
+               }
         }
+            Some(ui_event) = ui_rx.recv() => {
+                match ui_event {
+                    UIEvent::RefreshPods(pods) => pod_list = pods
+                }
+            }
+
+           };
     }
 
     Ok(())
 }
 
-async fn refresh_pod_list(namespace: &str) -> Result<Vec<KubePod>> {
-    let pod_list: Vec<_> = get_pods(namespace)
-        .await?
-        .iter()
-        .map(|p| KubePod {
-            name: Meta::name(p),
-        })
-        .collect();
+impl KubePod {
+    pub fn new(pod: &Pod) -> Self {
+        let empty = vec![];
+        let cs = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.container_statuses.as_ref())
+            .unwrap_or(&empty);
+        let mut r = 0;
+        let mut rc = 0;
+        for c in cs {
+            if c.ready {
+                r += 1;
+            }
 
-    Ok(pod_list)
+            rc += c.restart_count;
+        }
+
+        let empty_str = String::new();
+        let phase = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_ref())
+            .unwrap_or(&empty_str);
+
+        KubePod {
+            name: Meta::name(pod),
+            ready: r,
+            container_count: cs.len() as i32,
+            status: phase.to_string(),
+            restart_count: rc,
+        }
+    }
+}
+
+fn refresh_pod_list(namespace: &str, mut tx: tokio::sync::mpsc::Sender<UIEvent>) -> Result<()> {
+    let n: String = namespace.into();
+    tokio::spawn(async move {
+        match get_pods(&n).await {
+            Ok(l) => {
+                let pod_list: Vec<KubePod> = l.iter().map(|p| KubePod::new(p)).collect();
+
+                let _ = tx.send(UIEvent::RefreshPods(pod_list)).await;
+            }
+            Err(e) => println!("{:?}", e),
+        }
+    });
+
+    Ok(())
 }
 
 fn render_pods<'a>(pod_list: &[KubePod]) -> Table<'a> {
@@ -218,9 +286,9 @@ fn render_pods<'a>(pod_list: &[KubePod]) -> Table<'a> {
         .map(|p| {
             Row::new(vec![
                 Cell::from(Span::raw(p.name.to_string())),
-                Cell::from(Span::raw("1/1")),
-                Cell::from(Span::raw("0")),
-                Cell::from(Span::raw("Running")),
+                Cell::from(Span::raw(format!("{}/{}", p.ready, p.container_count))),
+                Cell::from(Span::raw(format!("{}", p.restart_count))),
+                Cell::from(Span::raw(p.status.clone())),
             ])
         })
         .collect();

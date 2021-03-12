@@ -155,7 +155,7 @@ pub async fn stream_logs(
                 line_str,
                 style::Reset
             );
-        } else if re.is_match(&line_str) {
+        } else if !highlight.is_empty() && re.is_match(&line_str) {
             println!(
                 "{}{}{}{}",
                 color::Fg(color::Yellow),
