@@ -47,6 +47,8 @@ pub struct UIOpts {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
+    std::env::set_var("RUST_LOG", "trace");
     let opts: Opts = Opts::parse();
 
     match run(&opts).await {

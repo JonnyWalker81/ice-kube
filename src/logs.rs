@@ -2,16 +2,25 @@ use futures::{StreamExt, TryStreamExt};
 use std::{collections::HashMap, io};
 
 use anyhow::Result;
+use crossterm::{
+    event, execute,
+    style::{
+        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
+    Result as CrossResult,
+};
 use futures::future::join_all;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     api::{ListParams, LogParams, Meta},
+    config::KubeConfigOptions,
     Api, Client, Config,
 };
 use lazy_static::lazy_static;
+use log::{debug, error, info, log_enabled, Level};
 use regex::Regex;
-use std::io::Write;
-use termion::{color, style};
+use std::io::{stdout, Write};
+
 use tokio::task;
 
 use crate::{
@@ -20,19 +29,47 @@ use crate::{
 };
 
 lazy_static! {
-    static ref COLORS: Vec<color::Rgb> = vec![
-        color::Rgb(0, 255, 0),
-        color::Rgb(128, 128, 0),
-        color::Rgb(0, 255, 255),
-        color::Rgb(255, 192, 203),
-        color::Rgb(245, 255, 250),
-        color::Rgb(221, 160, 221),
-        color::Rgb(154, 205, 50),
-        color::Rgb(230, 230, 250),
+    static ref COLORS: Vec<Color> = vec![
+        Color::Rgb { r: 0, g: 255, b: 0 },
+        Color::Rgb {
+            r: 128,
+            g: 128,
+            b: 0
+        },
+        Color::Rgb {
+            r: 0,
+            g: 255,
+            b: 255
+        },
+        Color::Rgb {
+            r: 255,
+            g: 192,
+            b: 203
+        },
+        Color::Rgb {
+            r: 245,
+            g: 120,
+            b: 250
+        },
+        Color::Rgb {
+            r: 221,
+            g: 160,
+            b: 221
+        },
+        Color::Rgb {
+            r: 154,
+            g: 205,
+            b: 50
+        },
+        Color::Rgb {
+            r: 230,
+            g: 230,
+            b: 120
+        },
     ];
 }
 
-pub fn get_color() -> Result<color::Rgb> {
+pub fn get_color() -> Result<Color> {
     use rand::Rng;
 
     let mut rng = rand::thread_rng();
@@ -87,8 +124,8 @@ pub async fn select_pod(o: &LogsOpts) -> Result<()> {
 }
 
 async fn list_pods(namespace: &str) -> Result<HashMap<usize, String>> {
-    std::env::set_var("RUST_LOG", "info");
-    env_logger::init();
+    // std::env::set_var("RUST_LOG", "info");
+    // env_logger::init();
 
     let pods = get_pods(namespace).await?;
     let mut pod_map = HashMap::new();
@@ -101,7 +138,11 @@ async fn list_pods(namespace: &str) -> Result<HashMap<usize, String>> {
 }
 
 async fn collect_pods(namespace: &str, pattern: &str) -> Result<Vec<String>> {
-    let mut client_config = Config::infer().await?;
+    let mut client_config = match Config::infer().await {
+        Ok(c) => c,
+        Err(_) => Config::from_kubeconfig(&KubeConfigOptions::default()).await?,
+    };
+
     // client_config.timeout = std::time::Duration::from_secs(60 * 60 * 24);
     client_config.timeout = None;
     let client = Client::new(client_config);
@@ -128,10 +169,14 @@ pub async fn stream_logs(
     namespace: String,
     pod_name: String,
     tail_lines: i64,
-    c: color::Rgb,
+    c: Color,
     highlight: String,
 ) -> Result<()> {
-    let mut client_config = Config::infer().await?;
+    let mut client_config = match Config::infer().await {
+        Ok(c) => c,
+        Err(_) => Config::from_kubeconfig(&KubeConfigOptions::default()).await?,
+    };
+
     // client_config.timeout = std::time::Duration::from_secs(60 * 60 * 24);
     client_config.timeout = None;
     let client = Client::new(client_config);
@@ -143,29 +188,35 @@ pub async fn stream_logs(
     lp.tail_lines = Some(tail_lines);
     let mut logs = pods.log_stream(&pod_name, &lp).await?.boxed();
     let re: Regex = Regex::new(&highlight).unwrap();
-    println!("{}", color::Fg(color::Reset));
+    execute!(stdout(), ResetColor)?;
     while let Some(line) = logs.try_next().await? {
         let line_str = String::from_utf8((&line).to_vec())?;
-        print!("{}{}  ", color::Fg(c), pod_name);
+        execute!(
+            stdout(),
+            SetForegroundColor(c),
+            Print(&pod_name),
+            Print(" ")
+        )?;
         if line_str.contains("ERROR") || line_str.contains("error") {
-            println!(
-                "{}{}{}{}",
-                color::Fg(color::Red),
-                style::Bold,
-                line_str,
-                style::Reset
-            );
+            execute!(
+                stdout(),
+                SetForegroundColor(Color::Red),
+                SetAttribute(Attribute::Bold),
+                Print(line_str),
+                ResetColor
+            )?;
         } else if !highlight.is_empty() && re.is_match(&line_str) {
-            println!(
-                "{}{}{}{}",
-                color::Fg(color::Yellow),
-                style::Bold,
-                line_str,
-                style::Reset
-            );
+            execute!(
+                stdout(),
+                SetForegroundColor(Color::Yellow),
+                SetAttribute(Attribute::Bold),
+                Print(line_str),
+                ResetColor
+            )?;
         } else {
-            println!("{}{}", color::Fg(color::Reset), line_str);
+            execute!(stdout(), ResetColor, Print(line_str))?;
         }
+        println!();
     }
 
     Ok(())
