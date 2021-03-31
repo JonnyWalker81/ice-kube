@@ -37,6 +37,8 @@ pub struct LogsOpts {
     terms: Option<String>,
     #[clap(short = 'l', long = "highlight")]
     highlight: Option<String>,
+    #[clap(short = 'r', long = "filter")]
+    filter: bool,
 }
 
 #[derive(Debug, Clap)]
@@ -68,7 +70,15 @@ async fn run(opts: &Opts) -> Result<()> {
 
                 let h = o.highlight.to_str();
 
-                logs::stream_logs(o.namespace.clone(), p.to_string(), o.tail_length, c, h).await?;
+                logs::stream_logs(
+                    o.namespace.clone(),
+                    p.to_string(),
+                    o.tail_length,
+                    c,
+                    h,
+                    o.filter,
+                )
+                .await?;
             }
             None => match o.pattern {
                 Some(ref p) => {

@@ -90,7 +90,7 @@ pub async fn follow_logs(o: &LogsOpts, p: &str) -> Result<()> {
 
         let h = o.highlight.to_str();
 
-        let t = task::spawn(stream_logs(n, pn, o.tail_length, c, h));
+        let t = task::spawn(stream_logs(n, pn, o.tail_length, c, h, o.filter));
         tasks.push(t);
     }
 
@@ -114,7 +114,15 @@ pub async fn select_pod(o: &LogsOpts) -> Result<()> {
 
                 let h = o.highlight.to_str();
 
-                stream_logs(o.namespace.clone(), p.clone(), o.tail_length, c, h).await?;
+                stream_logs(
+                    o.namespace.clone(),
+                    p.clone(),
+                    o.tail_length,
+                    c,
+                    h,
+                    o.filter,
+                )
+                .await?;
             }
         }
         Err(error) => println!("error: {}", error),
@@ -171,6 +179,7 @@ pub async fn stream_logs(
     tail_lines: i64,
     c: Color,
     highlight: String,
+    filter: bool,
 ) -> Result<()> {
     let mut client_config = match Config::infer().await {
         Ok(c) => c,
@@ -191,32 +200,48 @@ pub async fn stream_logs(
     execute!(stdout(), ResetColor)?;
     while let Some(line) = logs.try_next().await? {
         let line_str = String::from_utf8((&line).to_vec())?;
-        execute!(
-            stdout(),
-            SetForegroundColor(c),
-            Print(&pod_name),
-            Print(" ")
-        )?;
-        if line_str.contains("ERROR") || line_str.contains("error") {
-            execute!(
-                stdout(),
-                SetForegroundColor(Color::Red),
-                SetAttribute(Attribute::Bold),
-                Print(line_str),
-                ResetColor
-            )?;
-        } else if !highlight.is_empty() && re.is_match(&line_str) {
-            execute!(
-                stdout(),
-                SetForegroundColor(Color::Yellow),
-                SetAttribute(Attribute::Bold),
-                Print(line_str),
-                ResetColor
-            )?;
+        if filter {
+            if !highlight.is_empty() && re.is_match(&line_str) {
+                execute!(
+                    stdout(),
+                    SetForegroundColor(Color::Yellow),
+                    SetAttribute(Attribute::Bold),
+                    Print(line_str),
+                    ResetColor
+                )?;
+                println!();
+            }
         } else {
-            execute!(stdout(), ResetColor, Print(line_str))?;
+            execute!(
+                stdout(),
+                SetForegroundColor(c),
+                Print(&pod_name),
+                Print(" ")
+            )?;
+            if line_str.contains("ERROR")
+                || line_str.contains("error")
+                || line_str.contains("Error")
+            {
+                execute!(
+                    stdout(),
+                    SetForegroundColor(Color::Red),
+                    SetAttribute(Attribute::Bold),
+                    Print(line_str),
+                    ResetColor
+                )?;
+            } else if !highlight.is_empty() && re.is_match(&line_str) {
+                execute!(
+                    stdout(),
+                    SetForegroundColor(Color::Yellow),
+                    SetAttribute(Attribute::Bold),
+                    Print(line_str),
+                    ResetColor
+                )?;
+            } else {
+                execute!(stdout(), ResetColor, Print(line_str))?;
+            }
+            println!();
         }
-        println!();
     }
 
     Ok(())
